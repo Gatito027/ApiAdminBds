@@ -11,21 +11,6 @@ app.get('/', (req, res) => {
     res.send('¡Hola, mundo!');
 });
 
-app.post('/create-db', async (req, res) => {
-    try {
-        const { nombre } = req.body; 
-        if (!nombre) {
-            return res.status(400).json({ error: 'Nombre es requerido' });
-        }
-        //*Logica
-
-        return res.status(200).json({ nombre });
-    } catch (error) {
-        console.error(error);
-        return res.status(500).json({ error: 'Error Interno' });
-    }
-});
-
 app.get('/list-dbs', async (req, res) => {
     try {
         const client = new MongoClient(mongoURI);
@@ -52,8 +37,49 @@ app.get('/list-dbs', async (req, res) => {
     }
 });
 
+app.post('/create-db', async (req, res) => {
+    try {
+        const { dbName } = req.body; // Obtener el nombre de la base de datos desde el cuerpo de la solicitud
+        if (!dbName) {
+            return res.status(400).json({ error: 'El nombre de la base de datos es requerido' });
+        }
+        // Conectar al cliente de MongoDB
+        const client = new MongoClient(mongoURI);
+        await client.connect();
+        console.log('Conectado a MongoDB');
+        // Crear una colección inicial para activar la creación de la base de datos
+        const db = client.db(dbName);
+        await db.createCollection('default_collection');
+        console.log(`Base de datos creada: ${dbName}`);
+        await client.close();
+        return res.status(200).json({ message: `Base de datos ${dbName} creada con éxito` });
+    } catch (error) {
+        console.error('Error al crear la base de datos:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
 
-
+app.post('/delete-db', async (req, res) => {
+    try {
+        const { dbName } = req.body; // Recibe el nombre de la base de datos desde la solicitud
+        if (!dbName) {
+            return res.status(400).json({ error: 'El nombre de la base de datos es requerido' });
+        }
+        // Conectar al cliente de MongoDB
+        const client = new MongoClient(mongoURI);
+        await client.connect();
+        console.log('Conectado a MongoDB');
+        // Obtener la base de datos y eliminarla
+        const db = client.db(dbName);
+        await db.dropDatabase();
+        console.log(`Base de datos eliminada: ${dbName}`);
+        await client.close();
+        return res.status(200).json({ message: `Base de datos ${dbName} eliminada exitosamente` });
+    } catch (error) {
+        console.error('Error al eliminar la base de datos:', error);
+        return res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
 
 app.listen(port, () => {
     console.log(`Servidor corriendo en http://localhost:${port}`);
