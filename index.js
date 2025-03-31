@@ -4,6 +4,9 @@ const express = require('express');
 const { MongoClient } = require('mongodb');
 const app = express();
 const port = 3000;
+const { exec } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 app.use(express.json());
 const mongoURI = process.env.MONGO_URI; // URL de tu servidor MongoDB
 
@@ -279,6 +282,123 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
+app.post('/create-backup', async (req, res) => {
+    try {
+        const { dbName, backupPath } = req.body;
+
+        // Validaciones
+        if (!dbName || !backupPath) {
+            return res.status(400).json({ 
+                error: 'Nombre de la base de datos y ruta de backup son requeridos' 
+            });
+        }
+
+        // Verificar si la ruta existe o crearla
+        if (!fs.existsSync(backupPath)) {
+            fs.mkdirSync(backupPath, { recursive: true });
+        }
+
+        // Generar nombre de archivo con timestamp
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupDir = path.join(backupPath, `backup_${dbName}_${timestamp}`);
+
+        // Comando mongodump
+        const cmd = `mongodump --uri="${mongoURI}" --db=${dbName} --out="${backupDir}"`;
+
+        // Ejecutar el backup
+        exec(cmd, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`Error en backup: ${error.message}`);
+                return res.status(500).json({ 
+                    error: 'Error al realizar el backup',
+                    details: error.message 
+                });
+            }
+            if (stderr) {
+                console.warn(`Advertencias en backup: ${stderr}`);
+            }
+
+            console.log(`Backup completado para ${dbName} en ${backupDir}`);
+            return res.status(200).json({
+                message: 'Backup completado exitosamente',
+                backup: {
+                    database: dbName,
+                    path: backupDir,
+                    timestamp: new Date(),
+                    size: getFolderSize(backupDir)
+                }
+            });
+        });
+
+    } catch (error) {
+        console.error('Error en el proceso de backup:', error);
+        return res.status(500).json({ 
+            error: 'Error interno del servidor',
+            details: error.message 
+        });
+    }
+});
+
+// Función auxiliar para obtener tamaño de directorio
+function getFolderSize(folderPath) {
+    const files = fs.readdirSync(folderPath);
+    let size = 0;
+    files.forEach(file => {
+        size += fs.statSync(path.join(folderPath, file)).size;
+    });
+    return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+app.get('/query-collection', async (req, res) => {
+    try {
+        const { dbName, collectionName } = req.body;
+
+        // Validaciones básicas
+        if (!dbName || !collectionName) {
+            return res.status(400).json({ 
+                error: 'Se requieren los parámetros dbName y collectionName' 
+            });
+        }
+
+        // Conectar a MongoDB
+        const client = new MongoClient(mongoURI);
+        await client.connect();
+        console.log(`Consultando colección: ${dbName}.${collectionName}`);
+
+        // Obtener referencia a la colección
+        const db = client.db(dbName);
+        const collection = db.collection(collectionName);
+
+        // Consultar TODOS los documentos sin paginación
+        const documents = await collection.find({}).toArray();
+        const totalCount = documents.length;
+
+        await client.close();
+
+        return res.status(200).json({
+            database: dbName,
+            collection: collectionName,
+            totalDocuments: totalCount,
+            documents: documents
+        });
+
+    } catch (error) {
+        console.error('Error al consultar la colección:', error);
+        
+        // Manejo específico de errores
+        if (error.message.includes('does not exist') || 
+            error.message.includes('ns not found')) {
+            return res.status(404).json({ 
+                error: 'Base de datos o colección no encontrada' 
+            });
+        }
+
+        return res.status(500).json({ 
+            error: 'Error al consultar la colección',
+            details: error.message 
+        });
+    }
+});
 
 app.listen(port, () => {
     console.log(`Servidor corriendo en http://localhost:${port}`);
