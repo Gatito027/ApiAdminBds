@@ -400,6 +400,33 @@ app.get('/query-collection', async (req, res) => {
     }
 });
 
+app.get('/list-users-collection', async (req, res) => {
+    try {
+        const client = new MongoClient(mongoURI);
+
+        // Conectar al servidor
+        await client.connect();
+        console.log('Conectado a MongoDB');
+
+        // Consultar la colección system.users (requiere privilegios)
+        const adminDb = client.db('admin');
+        const users = await adminDb.collection('system.users').find().toArray();
+
+        // Cerrar la conexión
+        await client.close();
+
+        // Responder con la lista de usuarios
+        return res.status(200).json(users);
+    } catch (error) {
+        console.error('Error al listar usuarios:', error);
+        return res.status(500).json({ 
+            error: 'Error al obtener usuarios', 
+            details: error.message,
+            note: 'Este endpoint requiere privilegios administrativos'
+        });
+    }
+});
+
 app.listen(port, () => {
     console.log(`Servidor corriendo en http://localhost:${port}`);
 });
