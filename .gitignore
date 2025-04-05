@@ -1,2 +1,5 @@
 /node_modules
 .env
+/temp_imports
+/uploads
+/temp_exports

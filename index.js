@@ -427,7 +427,7 @@ app.post('/create-backup', async (req, res) => {
 });
 
 app.post('/export-db', async (req, res) => {
-    const { dbName, containerName = 'mongo-contenedor' } = req.body;
+    const { dbName, collection, containerName = 'mongo-contenedor' } = req.body;
     
     if (!dbName) {
         return res.status(400).json({ 
@@ -455,7 +455,7 @@ app.post('/export-db', async (req, res) => {
         }
 
         // 3. Ejecutar mongoexport DENTRO del contenedor
-        const exportCommand = `docker exec ${containerName} mongoexport --db ${dbName} --collection ${dbName} --out ${containerExportPath}`;
+        const exportCommand = `docker exec ${containerName} mongoexport --db ${dbName} --collection ${collection} --out ${containerExportPath}`;
         console.log(`Ejecutando exportación: ${exportCommand}`);
         await execPromise(exportCommand);
 
