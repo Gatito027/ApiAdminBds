@@ -4,9 +4,10 @@ const express = require('express');
 const { MongoClient } = require('mongodb');
 const app = express();
 const port = 3000;
-const { exec } = require('child_process');
-const path = require('path');
 const fs = require('fs');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 app.use(express.json());
 const mongoURI = process.env.MONGO_URI; // URL de tu servidor MongoDB
 
@@ -251,7 +252,7 @@ app.post('/create-user', async (req, res) => {
         console.log(`Usuario ${username} creado en ${dbName} con roles:`, userRoles);
 
         await client.close();
-        return res.status(201).json({
+        return res.status(200).json({
             message: `Usuario creado exitosamente en ${dbName}`,
             user: {
                 username,
@@ -282,72 +283,7 @@ app.post('/create-user', async (req, res) => {
     }
 });
 
-app.post('/create-backup', async (req, res) => {
-    try {
-        const { dbName, backupPath } = req.body;
 
-        // Validaciones
-        if (!dbName || !backupPath) {
-            return res.status(400).json({ 
-                error: 'Nombre de la base de datos y ruta de backup son requeridos' 
-            });
-        }
-
-        // Verificar si la ruta existe o crearla
-        if (!fs.existsSync(backupPath)) {
-            fs.mkdirSync(backupPath, { recursive: true });
-        }
-
-        // Generar nombre de archivo con timestamp
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const backupDir = path.join(backupPath, `backup_${dbName}_${timestamp}`);
-
-        // Comando mongodump
-        const cmd = `mongodump --uri="${mongoURI}" --db=${dbName} --out="${backupDir}"`;
-
-        // Ejecutar el backup
-        exec(cmd, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Error en backup: ${error.message}`);
-                return res.status(500).json({ 
-                    error: 'Error al realizar el backup',
-                    details: error.message 
-                });
-            }
-            if (stderr) {
-                console.warn(`Advertencias en backup: ${stderr}`);
-            }
-
-            console.log(`Backup completado para ${dbName} en ${backupDir}`);
-            return res.status(200).json({
-                message: 'Backup completado exitosamente',
-                backup: {
-                    database: dbName,
-                    path: backupDir,
-                    timestamp: new Date(),
-                    size: getFolderSize(backupDir)
-                }
-            });
-        });
-
-    } catch (error) {
-        console.error('Error en el proceso de backup:', error);
-        return res.status(500).json({ 
-            error: 'Error interno del servidor',
-            details: error.message 
-        });
-    }
-});
-
-// Función auxiliar para obtener tamaño de directorio
-function getFolderSize(folderPath) {
-    const files = fs.readdirSync(folderPath);
-    let size = 0;
-    files.forEach(file => {
-        size += fs.statSync(path.join(folderPath, file)).size;
-    });
-    return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-}
 
 app.get('/query-collection', async (req, res) => {
     try {
@@ -403,11 +339,9 @@ app.get('/query-collection', async (req, res) => {
 app.get('/list-users-collection', async (req, res) => {
     try {
         const client = new MongoClient(mongoURI);
-
         // Conectar al servidor
         await client.connect();
         console.log('Conectado a MongoDB');
-
         // Consultar la colección system.users (requiere privilegios)
         const adminDb = client.db('admin');
         const users = await adminDb.collection('system.users').find().toArray();
@@ -426,6 +360,69 @@ app.get('/list-users-collection', async (req, res) => {
         });
     }
 });
+
+app.post('/create-backup', async (req, res) => {
+    const { dbName, backupPath, containerName = 'mongo-contenedor' } = req.body;
+    
+    if (!dbName || !backupPath) {
+        return res.status(400).json({ 
+            success: false,
+            error: 'PARAMS_MISSING',
+            message: 'Se requieren dbName y backupPath'
+        });
+    }
+
+    try {
+        // 1. Verificar que el directorio de backup existe localmente
+        if (!fs.existsSync(backupPath)) {
+            fs.mkdirSync(backupPath, { recursive: true });
+        }
+
+        // 2. Crear backup dentro del contenedor
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const containerBackupPath = `${backupPath}/mongo-backup-${timestamp}`;
+        
+        // Comando para ejecutar mongodump dentro del contenedor
+        const dumpCommand = `docker exec ${containerName} mongodump --db ${dbName} --out ${containerBackupPath}`;
+        
+        // 3. Copiar los archivos del contenedor al host
+        //const copyCommand = `docker cp ${containerName}:${containerBackupPath} ${backupPath}`;
+        
+        // 4. Limpiar el backup temporal dentro del contenedor
+
+        // Ejecutar los comandos en secuencia
+        console.log(`Ejecutando backup: ${dumpCommand}`);
+        await execPromise(dumpCommand);
+        
+        /*console.log(`Copiando archivos: ${copyCommand}`);
+        await execPromise(copyCommand);*/
+        
+
+        return res.status(200).json({
+            success: true,
+            message: 'Backup creado exitosamente',
+            details: {
+                dbName,
+                backupPath: `${backupPath}/mongo-backup-${timestamp}`,
+                containerName,
+                commandsExecuted: [dumpCommand]
+            }
+        });
+
+    } catch (error) {
+        console.error('Error en backup:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'BACKUP_FAILED',
+            message: 'Error durante el backup',
+            details: {
+                error: error.stderr || error.message,
+                suggestion: 'Verifique: 1) Docker está corriendo, 2) El contenedor existe y está corriendo, 3) MongoDB está activo en el contenedor, 4) Permisos de escritura en el path de backup'
+            }
+        });
+    }
+});
+
 
 app.listen(port, () => {
     console.log(`Servidor corriendo en http://localhost:${port}`);
