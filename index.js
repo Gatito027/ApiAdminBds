@@ -7,6 +7,9 @@ const port = 3000;
 const fs = require('fs');
 const { exec } = require('child_process');
 const util = require('util');
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+const path = require('path');
 const execPromise = util.promisify(exec);
 app.use(express.json());
 const mongoURI = process.env.MONGO_URI; // URL de tu servidor MongoDB
@@ -423,6 +426,152 @@ app.post('/create-backup', async (req, res) => {
     }
 });
 
+app.post('/export-db', async (req, res) => {
+    const { dbName, containerName = 'mongo-contenedor' } = req.body;
+    
+    if (!dbName) {
+        return res.status(400).json({ 
+            success: false,
+            error: 'PARAMS_MISSING',
+            message: 'Se requiere dbName'
+        });
+    }
+
+    try {
+        // 1. Preparar nombres de archivos
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const exportFileName = `${dbName}-export-${timestamp}.json`;
+        
+        // Ruta dentro del contenedor (usamos /tmp que siempre existe)
+        const containerExportPath = `/tmp/${exportFileName}`;
+        
+        // Ruta en el host
+        const hostTempDir = './temp_exports';
+        const hostExportPath = `${hostTempDir}/${exportFileName}`;
+
+        // 2. Crear directorio temporal en el host si no existe
+        if (!fs.existsSync(hostTempDir)) {
+            fs.mkdirSync(hostTempDir, { recursive: true });
+        }
+
+        // 3. Ejecutar mongoexport DENTRO del contenedor
+        const exportCommand = `docker exec ${containerName} mongoexport --db ${dbName} --collection ${dbName} --out ${containerExportPath}`;
+        console.log(`Ejecutando exportación: ${exportCommand}`);
+        await execPromise(exportCommand);
+
+        // 4. Copiar archivo DEL contenedor AL host
+        const copyCommand = `docker cp ${containerName}:${containerExportPath} ${hostExportPath}`;
+        console.log(`Copiando archivo: ${copyCommand}`);
+        await execPromise(copyCommand);
+
+        // 5. Limpiar archivo temporal DENTRO del contenedor
+        //await execPromise(`docker exec ${containerName} rm ${containerExportPath}`);
+
+        // 6. Verificar que el archivo existe en el host
+        if (!fs.existsSync(hostExportPath)) {
+            throw new Error('El archivo de exportación no se copió correctamente desde el contenedor');
+        }
+
+        // 7. Configurar respuesta para descarga
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', `attachment; filename=${exportFileName}`);
+        
+        const fileStream = fs.createReadStream(hostExportPath);
+        fileStream.pipe(res);
+        
+        // 8. Limpiar archivo temporal después de enviar
+        fileStream.on('end', () => {
+            fs.unlink(hostExportPath, (err) => {
+                if (err) console.error('Error eliminando archivo temporal:', err);
+            });
+        });
+
+    } catch (error) {
+        console.error('Error detallado en exportación:', {
+            message: error.message,
+            stack: error.stack,
+            stderr: error.stderr,
+            stdout: error.stdout
+        });
+        
+        return res.status(500).json({
+            success: false,
+            error: 'EXPORT_FAILED',
+            message: 'Error durante la exportación',
+            details: {
+                error: error.stderr || error.message,
+                suggestion: 'Verifique: 1) El nombre de la colección coincide con la base de datos, 2) MongoDB está corriendo en el contenedor, 3) Hay espacio disponible en /tmp del contenedor'
+            }
+        });
+    }
+});
+
+app.post('/import-db', upload.single('backupFile'), async (req, res) => {
+    const { dbName, containerName = 'mongo-contenedor', dropExisting = false } = req.body;
+    const backupFile = req.file;
+    
+    if (!dbName || !backupFile) {
+        return res.status(400).json({ 
+            success: false,
+            error: 'PARAMS_MISSING',
+            message: 'Se requieren dbName y un archivo de backup'
+        });
+    }
+
+    try {
+        // Directorio temporal para importación
+        const tempDir = './temp_imports';
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+        }
+
+        // Mover el archivo subido a ubicación conocida
+        const tempFilePath = `${tempDir}/${backupFile.originalname}`;
+        await fs.promises.rename(backupFile.path, tempFilePath);
+
+        // Copiar archivo al contenedor
+        const containerFilePath = `/tmp/${backupFile.originalname}`;
+        const copyCommand = `docker cp ${tempFilePath} ${containerName}:${containerFilePath}`;
+        await execPromise(copyCommand);
+
+        // Comando para importar
+        const dropOption = dropExisting ? '--drop' : '';
+        const importCommand = `docker exec ${containerName} mongoimport --db ${dbName} --collection ${dbName} --file ${containerFilePath} ${dropOption}`;
+        
+        console.log(`Ejecutando importación: ${importCommand}`);
+        await execPromise(importCommand);
+
+        // Limpiar archivos temporales
+        await Promise.all([
+            fs.promises.unlink(tempFilePath),
+            execPromise(`docker exec ${containerName} rm ${containerFilePath}`)
+        ]);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Importación completada exitosamente',
+            details: {
+                dbName,
+                fileName: backupFile.originalname,
+                fileSize: backupFile.size,
+                containerName,
+                dropExisting
+            }
+        });
+
+    } catch (error) {
+        console.error('Error en importación:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'IMPORT_FAILED',
+            message: 'Error durante la importación',
+            details: {
+                error: error.stderr || error.message,
+                suggestion: 'Verifique: 1) El formato del archivo, 2) Permisos, 3) MongoDB disponible'
+            }
+        });
+    }
+});
 
 app.listen(port, () => {
     console.log(`Servidor corriendo en http://localhost:${port}`);
